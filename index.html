@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Merry Christmas</title>
+<style>
+  html, body { margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:#000; }
+  #main, #snow { position:absolute; left:0; top:0; width:100%; height:100%; display:block; }
+  #snow { pointer-events:none; }
+  #ui { position:absolute; top:14px; right:14px; z-index:10; display:flex; gap:8px; }
+  #ui button {
+    background:rgba(255,255,255,0.12); color:#fff;
+    border:1px solid rgba(255,255,255,0.45); border-radius:20px;
+    padding:8px 18px; font-size:14px; font-family:"Microsoft YaHei",sans-serif;
+    cursor:pointer; backdrop-filter:blur(4px); transition:background 0.2s;
+  }
+  #ui button:hover { background:rgba(255,255,255,0.28); }
+  #ui button.active { background:rgba(255,220,120,0.35); border-color:rgba(255,220,120,0.9); }
+</style>
+</head>
+<body>
+<canvas id="main"></canvas>
+<canvas id="snow"></canvas>
+<div id="ui">
+  <button id="btnWhite">初始纯白</button>
+  <button id="btnLights" class="active">彩灯版</button>
+</div>
+<script>
+"use strict";
+
+const CAM_DIST = 13, CAM_HEIGHT = 6.0, PITCH = -0.25, TREE_HEIGHT = 12.0;
+const TREE_POINTS = 50000, GROUND_POINTS = 4000, STAR_POINTS = 1200, TOP_POINTS = 1000;
+const YELLOW_STAR_POINTS = 1500, LIGHT_POINTS = 80, GREEN_LIGHT_POINTS = 80, RED_LIGHT_POINTS = 80;
+const SNOW2D_POINTS = 35;
+const TAU = Math.PI * 2;
+const cosP = Math.cos(PITCH), sinP = Math.sin(PITCH);
+
+const mainCanvas = document.getElementById("main");
+const mainCtx = mainCanvas.getContext("2d", { alpha: false });
+const snowCanvas = document.getElementById("snow");
+const snowCtx = snowCanvas.getContext("2d");
+
+let renderW = 0, renderH = 0;
+let imageData = null, pixels = null, zbuf = null;
+
+function resize() {
+  const cssW = window.innerWidth, cssH = window.innerHeight;
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+  renderW = Math.max(1, Math.floor(cssW * dpr));
+  renderH = Math.max(1, Math.floor(cssH * dpr));
+  mainCanvas.width = renderW; mainCanvas.height = renderH;
+  mainCanvas.style.width = cssW + "px"; mainCanvas.style.height = cssH + "px";
+  snowCanvas.width = renderW; snowCanvas.height = renderH;
+  snowCanvas.style.width = cssW + "px"; snowCanvas.style.height = cssH + "px";
+  imageData = mainCtx.createImageData(renderW, renderH);
+  pixels = new Uint32Array(imageData.data.buffer);
+  zbuf = new Float32Array(renderW * renderH);
+}
+window.addEventListener("resize", resize);
+resize();
+
+function rnd(a, b) { return a + Math.random() * (b - a); }
+function rndInt(a, b) { return Math.floor(a + Math.random() * (b - a + 1)); }
+
+// ================= 点集: 紧凑数组 [x,y,z,r,g,b, ...] =================
+function makeSet() { return { a: [], n: 0 }; }
+function pushPt(s, x, y, z, r, g, b) {
+  s.a.push(x, y, z, r, g, b);
+  s.n++;
+}
+
+// ================= 生成器 =================
+function genTree(variant) {
+  const s = makeSet();
+  const loops = 9;
+  const spiralN = Math.floor(TREE_POINTS * 0.7);
+  const jitter = variant === "white" ? 0.22 : 0.10;
+  const rMin = variant === "white" ? 0.85 : 0.95;
+  const rMax = variant === "white" ? 1.08 : 1.04;
+
+  for (let i = 0; i < spiralN; i++) {
+    const u = Math.random();
+    const h = Math.pow(u, 1.6);
+    const y = TREE_HEIGHT * h + 0.2;
+    let baseR = Math.pow(1 - h, 1.1) * 3.2;
+    const bw = Math.max(0, Math.sin((h * 5.8 + 0.15) * TAU));
+    baseR *= 1.0 + 0.65 * bw;
+    const angle = u * loops * TAU + rnd(-jitter, jitter);
+    const r = baseR * rnd(rMin, rMax);
+    pushPt(s, Math.cos(angle) * r, y, Math.sin(angle) * r,
+      rndInt(140, 200), rndInt(200, 240), rndInt(240, 255));
+  }
+
+  const fillN = TREE_POINTS - spiralN;
+  for (let i = 0; i < fillN; i++) {
+    const h = Math.pow(Math.random(), 1.9);
+    const y = TREE_HEIGHT * h + 0.2 + rnd(-0.08, 0.08);
+    let baseR = Math.pow(1 - h, 1.1) * 4.3;
+    const bw = Math.max(0, Math.sin((h * 5.8 + 0.15) * TAU));
+    baseR *= 1.0 + 0.65 * bw;
+    const r = baseR * Math.sqrt(Math.random());
+    const angle = Math.random() * TAU;
+    pushPt(s,
+      Math.cos(angle) * r + rnd(-0.08, 0.08), y,
+      Math.sin(angle) * r + rnd(-0.08, 0.08),
+      rndInt(140, 200), rndInt(200, 240), rndInt(240, 255));
+  }
+  return s;
+}
+
+function genGroundRipple() {
+  const s = makeSet();
+  for (let i = 0; i < GROUND_POINTS; i++) {
+    const r = rnd(4.0, 13.0);
+    const theta = Math.random() * TAU;
+    pushPt(s, Math.cos(theta) * r, -0.25, Math.sin(theta) * r, 0, 0, 0);
+  }
+  return s;
+}
+
+function genGroundRings() {
+  const s = makeSet();
+  const rings = [4.6, 6.0, 7.4, 8.8, 10.2, 11.4];
+  for (let i = 0; i < GROUND_POINTS; i++) {
+    const ring = rings[rndInt(0, rings.length - 1)];
+    const g = ring + (Math.random() + Math.random() - 1) * 0.3;
+    const theta = Math.random() * TAU;
+    let cr, cg, cb;
+    if (Math.random() < 0.15) {
+      cr = 210 + rndInt(0, 30); cg = 240 + rndInt(0, 15); cb = 255;
+    } else {
+      cr = 150 + rndInt(0, 40); cg = 210 + rndInt(0, 30); cb = 245 + rndInt(0, 10);
+    }
+    pushPt(s, Math.cos(theta) * g, -0.25, Math.sin(theta) * g, cr, cg, cb);
+  }
+  return s;
+}
+
+function genSkyStars() {
+  const s = makeSet();
+  for (let i = 0; i < STAR_POINTS; i++) {
+    const x = rnd(-18, 18), z = rnd(-18, 18), y = rnd(3, 18);
+    let cr, cg, cb;
+    if (Math.random() < 0.4) {
+      cr = 230 + rndInt(0, 20); cg = 245; cb = 255;
+    } else {
+      cr = 180 + rndInt(0, 40); cg = 220 + rndInt(0, 25); cb = 255;
+    }
+    pushPt(s, x, y, z, cr, cg, cb);
+  }
+  return s;
+}
+
+function genYellowStars() {
+  const s = makeSet();
+  for (let i = 0; i < YELLOW_STAR_POINTS; i++) {
+    const u = Math.random();
+    const h = Math.pow(u, 1.6);
+    const y = TREE_HEIGHT * h + 0.2;
+    let baseR = Math.pow(1 - h, 1.1) * 3.2;
+    const bw = Math.max(0, Math.sin((h * 5.8 + 0.15) * TAU));
+    baseR *= 1.0 + 0.65 * bw;
+    const angle = Math.random() * TAU;
+    const r = baseR * rnd(0.92, 1.12);
+    pushPt(s, Math.cos(angle) * r, y, Math.sin(angle) * r,
+      255, rndInt(215, 255), rndInt(60, 160));
+  }
+  return s;
+}
+
+function genColoredLights(count, makeColor) {
+  const s = makeSet();
+  for (let i = 0; i < count; i++) {
+    const u = Math.random();
+    const h = Math.pow(u, 1.6);
+    const y = TREE_HEIGHT * h + 0.2;
+    let baseR = Math.pow(1 - h, 1.1) * 3.2;
+    const bw = Math.max(0, Math.sin((h * 5.8 + 0.15) * TAU));
+    baseR *= 1.0 + 0.65 * bw;
+    const angle = Math.random() * TAU;
+    const r = baseR * rnd(1.02, 1.14);
+    const c = makeColor();
+    pushPt(s, Math.cos(angle) * r, y, Math.sin(angle) * r, c[0], c[1], c[2]);
+  }
+  return s;
+}
+
+function genWhiteLights() {
+  return genColoredLights(LIGHT_POINTS, function () {
+    const v = rndInt(245, 255);
+    return [v, v, Math.min(255, v + rndInt(0, 10))];
+  });
+}
+function genGreenLights() {
+  return genColoredLights(GREEN_LIGHT_POINTS, function () {
+    return [rndInt(30, 120), rndInt(230, 255), rndInt(40, 140)];
+  });
+}
+function genRedLights() {
+  return genColoredLights(RED_LIGHT_POINTS, function () {
+    return [rndInt(230, 255), rndInt(30, 110), rndInt(30, 110)];
+  });
+}
+
+// ================= 树顶: 五角星 (彩灯版) =================
+function starPolygon(n, outer, inner) {
+  n = n || 5; outer = outer || 1.0; inner = inner || 0.42;
+  const pts = [];
+  for (let i = 0; i < n * 2; i++) {
+    const ang = Math.PI / 2 + i * Math.PI / n;
+    const rad = (i % 2 === 0) ? outer : inner;
+    pts.push([Math.cos(ang) * rad, Math.sin(ang) * rad]);
+  }
+  return pts;
+}
+
+function pointInPolygon(x, y, poly) {
+  let inside = false;
+  const n = poly.length;
+  for (let i = 0; i < n; i++) {
+    const x1 = poly[i][0], y1 = poly[i][1];
+    const x2 = poly[(i + 1) % n][0], y2 = poly[(i + 1) % n][1];
+    if ((y1 > y) !== (y2 > y)) {
+      const xin = (x2 - x1) * (y - y1) / (y2 - y1) + x1;
+      if (x < xin) inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function genTopStar() {
+  const s = makeSet();
+  const scale = 1.15;
+  const topY = TREE_HEIGHT + 0.15;
+  const poly = starPolygon();
+  let guard = 0;
+  while (s.n < TOP_POINTS && guard < TOP_POINTS * 50) {
+    guard++;
+    const x = rnd(-1.1, 1.1);
+    const y = rnd(-1.1, 1.1);
+    if (!pointInPolygon(x, y, poly)) continue;
+    const wx = x * scale;
+    const wy = topY + (y + 0.42) * scale;
+    const wz = rnd(-0.2, 0.2);
+    const dist = Math.sqrt(x * x + y * y);
+    const factor = Math.max(0.4, 1.2 - 0.45 * dist);
+    let cr = Math.max(120, Math.min(255, Math.floor(230 * factor + 25)));
+    let cg = Math.max(100, Math.min(255, Math.floor(200 * factor + 40)));
+    let cb = Math.max(20, Math.min(255, Math.floor(80 * factor + 30)));
+    pushPt(s, wx, wy, wz, cr, cg, cb);
+  }
+  return s;
+}
+
+// ================= 树顶: 爱心 (纯白版) =================
+function genHeart() {
+  const s = makeSet();
+  const scale = 0.9;
+  const topY = TREE_HEIGHT + 0.05;
+  let guard = 0;
+  while (s.n < TOP_POINTS && guard < TOP_POINTS * 50) {
+    guard++;
+    const x = rnd(-1.3, 1.3);
+    const y = rnd(-1.4, 1.4);
+    const f = Math.pow(x * x + y * y - 1.0, 3) - x * x * (y * y * y);
+    if (f > 0.0) continue;
+    const wx = x * scale * 0.8;
+    const wy = topY + (y + 1.0) * scale * 0.5;
+    const wz = rnd(-0.18, 0.18);
+    const dist = Math.sqrt(x * x + y * y);
+    const factor = Math.max(0.35, 1.15 - 0.5 * dist);
+    let cr = Math.max(80, Math.min(255, Math.floor(160 * factor + 70)));
+    let cg = Math.max(80, Math.min(255, Math.floor(210 * factor + 40)));
+    let cb = 255;
+    pushPt(s, wx, wy, wz, cr, cg, cb);
+  }
+  return s;
+}
+
+// ================= 飘雪系统 =================
+function initSnow() {
+  const flakes = [];
+  for (let i = 0; i < SNOW2D_POINTS; i++) {
+    flakes.push(makeFlake(rnd(-renderH, -10)));
+  }
+  return flakes;
+}
+
+function makeFlake(y0) {
+  const x = rnd(0, renderW);
+  const y = y0;
+  const size = rnd(6.0, 14.0);
+  const speed = rnd(40.0, 90.0);
+  const sway = rnd(0.2, 0.9);
+  const phase = rnd(0, TAU);
+  const rotSpeed = rnd(-0.6, 0.6);
+  const travel = renderH + 80 - y;
+  const life = travel / speed;
+  return [x, y, size, speed, sway, phase, rotSpeed, life, life];
+}
+
+function respawnFlake(f) {
+  const nf = makeFlake(rnd(-renderH, -10));
+  for (let i = 0; i < 9; i++) f[i] = nf[i];
+}
+
+function updateSnow(flakes, dt) {
+  for (let i = 0; i < flakes.length; i++) {
+    const f = flakes[i];
+    let x = f[0], y = f[1], phase = f[5], life = f[7];
+    y += f[3] * dt;
+    x += Math.sin(phase) * f[4] * dt * 18;
+    phase += f[6] * dt;
+    life -= dt;
+    if (life <= 0 || y > renderH + 50) {
+      respawnFlake(f);
+    } else {
+      f[0] = x; f[1] = y; f[5] = phase; f[7] = life;
+    }
+  }
+}
+
+function drawSnowflake(ctx, cx, cy, size, alpha) {
+  const a = Math.max(0, Math.min(255, alpha));
+  // 外层柔光
+  if (Math.floor(a / 20) > 0) {
+    ctx.fillStyle = "rgba(210,230,255," + (a / 20 / 255).toFixed(3) + ")";
+    ctx.beginPath(); ctx.arc(cx, cy, size * 3.2, 0, TAU); ctx.fill();
+  }
+  if (Math.floor(a / 12) > 0) {
+    ctx.fillStyle = "rgba(230,242,255," + (a / 12 / 255).toFixed(3) + ")";
+    ctx.beginPath(); ctx.arc(cx, cy, size * 2.0, 0, TAU); ctx.fill();
+  }
+  if (Math.floor(a / 8) > 0) {
+    ctx.fillStyle = "rgba(245,248,255," + (a / 8 / 255).toFixed(3) + ")";
+    ctx.beginPath(); ctx.arc(cx, cy, size * 1.4, 0, TAU); ctx.fill();
+  }
+
+  ctx.strokeStyle = "rgba(255,255,255," + (a / 255).toFixed(3) + ")";
+  ctx.lineWidth = 1;
+  // 6根主枝 + 小分叉
+  for (let i = 0; i < 6; i++) {
+    const ang = (i * 60) * Math.PI / 180;
+    const ex = cx + Math.cos(ang) * size;
+    const ey = cy + Math.sin(ang) * size;
+    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(ex, ey); ctx.stroke();
+
+    for (let k = 1; k <= 2; k++) {
+      const t = k / 3;
+      const sx = cx + (ex - cx) * t;
+      const sy = cy + (ey - cy) * t;
+      const subLen = size * 0.28;
+      const p1 = ang + Math.PI / 3;
+      const p2 = ang - Math.PI / 3;
+      ctx.beginPath(); ctx.moveTo(sx, sy);
+      ctx.lineTo(sx + Math.cos(p1) * subLen, sy + Math.sin(p1) * subLen);
+      ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(sx, sy);
+      ctx.lineTo(sx + Math.cos(p2) * subLen, sy + Math.sin(p2) * subLen);
+      ctx.stroke();
+    }
+  }
+  // 中心亮点
+  ctx.fillStyle = "rgba(255,255,255," + (a / 255).toFixed(3) + ")";
+  ctx.beginPath(); ctx.arc(cx, cy, Math.max(1, size * 0.18), 0, TAU); ctx.fill();
+  ctx.beginPath(); ctx.arc(cx, cy, Math.max(2, size * 0.35), 0, TAU); ctx.fill();
+}
+
+function drawSnow(flakes) {
+  snowCtx.clearRect(0, 0, renderW, renderH);
+  for (let i = 0; i < flakes.length; i++) {
+    const f = flakes[i];
+    if (f[8] <= 0) continue;
+    const p = f[7] / f[8];
+    let alpha = p > 0.25 ? 255 : Math.floor(255 * (p / 0.25));
+    alpha = Math.max(0, Math.min(255, alpha));
+    drawSnowflake(snowCtx, Math.floor(f[0]), Math.floor(f[1]), f[2], alpha);
+  }
+}
+
+// ================= 3D 投影 =================
+function project(x, y, z, angle, out) {
+  const ca = Math.cos(angle), sa = Math.sin(angle);
+  const xz = x * ca - z * sa;
+  const zz = x * sa + z * ca;
+
+  const yp = y * cosP - zz * sinP;
+  let zp = y * sinP + zz * cosP;
+
+  zp = zp + CAM_DIST;
+  const ypc = yp - CAM_HEIGHT;
+
+  if (zp <= 0.1) return false;
+
+  const f = (renderH * 0.63) / zp;
+  out[0] = Math.floor(renderW / 2 + xz * f);
+  out[1] = Math.floor(renderH / 2 - ypc * f);
+  out[2] = zp;
+  return true;
+}
+
+// ================= 场景数据 =================
+// 每个图层: { set, sizeBase, sizeCoef, sizeMin, ripple?, colorFn? }
+function buildLayers(mode) {
+  const layers = [];
+
+  if (mode === "white") {
+    const tree = genTree("white");
+    const ground = genGroundRings();
+    const stars = genSkyStars();
+    const heart = genHeart();
+
+    // 纯白版: 所有粒子同一尺寸公式
+    const unified = makeSet();
+    unified.a = tree.a.concat(ground.a, stars.a, heart.a);
+    unified.n = tree.n + ground.n + stars.n + heart.n;
+    layers.push({ set: unified, sizeBase: 3.6, sizeCoef: 0.13, sizeMin: 1 });
+  } else {
+    const tree = genTree("lights");
+    const ground = genGroundRipple();
+    const stars = genSkyStars();
+    const topStar = genTopStar();
+    const yellow = genYellowStars();
+    const whiteL = genWhiteLights();
+    const greenL = genGreenLights();
+    const redL = genRedLights();
+
+    const treeParts = makeSet();
+    treeParts.a = tree.a.concat(stars.a, topStar.a);
+    treeParts.n = tree.n + stars.n + topStar.n;
+
+    layers.push({ set: treeParts, sizeBase: 2.5, sizeCoef: 0.10, sizeMin: 1 });
+    layers.push({ set: ground, sizeBase: 2.4, sizeCoef: 0.10, sizeMin: 1, ripple: true });
+    layers.push({ set: yellow, sizeBase: 4.5, sizeCoef: 0.10, sizeMin: 2 });
+    const lights = makeSet();
+    lights.a = whiteL.a.concat(greenL.a, redL.a);
+    lights.n = whiteL.n + greenL.n + redL.n;
+    layers.push({ set: lights, sizeBase: 7.0, sizeCoef: 0.16, sizeMin: 3 });
+  }
+  return layers;
+}
+
+// ================= 渲染 =================
+let mode = "lights";
+let layersCache = { white: null, lights: null };
+let snow = null;
+let angle = 0;
+let rippleT = 0;
+let lastT = 0;
+const projOut = [0, 0, 0];
+
+function getLayers(m) {
+  if (!layersCache[m]) layersCache[m] = buildLayers(m);
+  return layersCache[m];
+}
+
+function rippleColor(x, z) {
+  const r = Math.sqrt(x * x + z * z);
+  let w = 0.65 * Math.sin(r * 2.2 - rippleT * 2.6)
+        + 0.35 * Math.sin(r * 4.7 - rippleT * 4.2);
+  w = (w + 1.0) * 0.5;
+  w *= Math.max(0.35, 1.0 - r / 15.0);
+  return [
+    Math.floor(35 + 175 * w),
+    Math.floor(110 + 135 * w),
+    Math.floor(185 + 70 * w)
+  ];
+}
+
+function drawDisk(cx, cy, radius, depth, r, g, b) {
+  const x0 = Math.max(0, cx - radius);
+  const x1 = Math.min(renderW - 1, cx + radius);
+  const y0 = Math.max(0, cy - radius);
+  const y1 = Math.min(renderH - 1, cy + radius);
+  // ABGR 小端 (RGBA -> Uint32: A<<24|B<<16|G<<8|R)
+  const col = (255 << 24) | (b << 16) | (g << 8) | r;
+  const r2 = radius * radius;
+  for (let yy = y0; yy <= y1; yy++) {
+    const dy = yy - cy;
+    let idx = yy * renderW + x0;
+    for (let xx = x0; xx <= x1; xx++, idx++) {
+      const dx = xx - cx;
+      if (dx * dx + dy * dy > r2) continue;
+      if (depth < zbuf[idx]) {
+        zbuf[idx] = depth;
+        pixels[idx] = col;
+      }
+    }
+  }
+}
+
+function frame(now) {
+  requestAnimationFrame(frame);
+  if (!lastT) lastT = now;
+  let dt = (now - lastT) / 1000;
+  lastT = now;
+  if (dt > 0.1) dt = 0.1;
+
+  angle += 0.0045 * (dt * 30); // 比 pygame 版慢一半
+  rippleT += dt;
+
+  // 清屏 + 深度 (必须不透明黑, 否则 alpha=0 在部分浏览器合成成白色)
+  pixels.fill(0xff000000);
+  zbuf.fill(Infinity);
+
+  const layers = getLayers(mode);
+  for (let li = 0; li < layers.length; li++) {
+    const layer = layers[li];
+    const arr = layer.set.a;
+    const n = layer.set.n;
+    const sizeBase = layer.sizeBase, sizeCoef = layer.sizeCoef, sizeMin = layer.sizeMin;
+    const doRipple = !!layer.ripple;
+
+    for (let i = 0; i < n; i++) {
+      const o = i * 6;
+      const x = arr[o], y = arr[o + 1], z = arr[o + 2];
+      let r = arr[o + 3], g = arr[o + 4], b = arr[o + 5];
+
+      if (!project(x, y, z, angle, projOut)) continue;
+      const sx = projOut[0], sy = projOut[1], depth = projOut[2];
+
+      let size = Math.floor(sizeBase - depth * sizeCoef);
+      if (size < sizeMin) size = sizeMin;
+
+      if (doRipple) {
+        const c = rippleColor(x, z);
+        r = c[0]; g = c[1]; b = c[2];
+      }
+
+      drawDisk(sx, sy, size, depth, r, g, b);
+    }
+  }
+
+  mainCtx.putImageData(imageData, 0, 0);
+
+  updateSnow(snow, dt);
+  drawSnow(snow);
+}
+
+// ================= UI =================
+const btnWhite = document.getElementById("btnWhite");
+const btnLights = document.getElementById("btnLights");
+
+function setMode(m) {
+  mode = m;
+  getLayers(m); // 预生成
+  btnWhite.classList.toggle("active", m === "white");
+  btnLights.classList.toggle("active", m === "lights");
+}
+
+btnWhite.addEventListener("click", function () { setMode("white"); });
+btnLights.addEventListener("click", function () { setMode("lights"); });
+
+// 启动
+snow = initSnow();
+getLayers("lights");
+getLayers("white");
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

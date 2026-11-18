@@ -17,6 +17,15 @@
   }
   #ui button:hover { background:rgba(255,255,255,0.28); }
   #ui button.active { background:rgba(255,220,120,0.35); border-color:rgba(255,220,120,0.9); }
+  #visits {
+    position:absolute; left:14px; bottom:14px; z-index:10;
+    display:flex; align-items:center; gap:8px;
+    font-family:"Microsoft YaHei",sans-serif; font-size:13px;
+    color:rgba(255,255,255,0.85);
+    background:rgba(0,0,0,0.35); border:1px solid rgba(255,255,255,0.25);
+    border-radius:14px; padding:6px 12px; backdrop-filter:blur(4px);
+  }
+  #visits img { display:block; height:20px; }
 </style>
 </head>
 <body>
@@ -25,6 +34,10 @@
 <div id="ui">
   <button id="btnWhite">初始纯白</button>
   <button id="btnLights" class="active">彩灯版</button>
+</div>
+<div id="visits">
+  <span>访问人数</span>
+  <img src="https://visitor-badge.laobi.icu/badge?page_id=denise-y-christmas-tree" alt="visitor count">
 </div>
 <script>
 "use strict";
